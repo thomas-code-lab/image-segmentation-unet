@@ -32,7 +32,7 @@ KERAS_MODEL_PATH = os.getenv("KERAS_MODEL_PATH", "/model/nerve_segmentation.kera
 if not os.path.exists(KERAS_MODEL_PATH) and os.path.exists(DEFAULT_KERAS_MODEL_PATH):
     KERAS_MODEL_PATH = DEFAULT_KERAS_MODEL_PATH
 
-KERAS_THRESHOLD = float(os.getenv("KERAS_THRESHOLD", "0.8"))
+KERAS_THRESHOLD = float(os.getenv("KERAS_THRESHOLD", "0.9"))
 RUN_EVERY_N_FRAMES = int(os.getenv("RUN_EVERY_N_FRAMES", "2"))
 KERAS_INPUT_SIZE = int(os.getenv("KERAS_INPUT_SIZE", "256"))
 
