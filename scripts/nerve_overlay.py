@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 from collections import deque
 
@@ -12,7 +13,7 @@ DEFAULT_MODEL = os.path.join(REPO_ROOT, "models", "nerve_segmentation.keras")
 
 # ========= CONFIG (env-first) =========
 IDX = int(os.getenv("OBS_CAMERA_INDEX", "1"))
-USE_FULL_FRAME = os.getenv("USE_FULL_FRAME", "0") == "0"
+USE_FULL_FRAME = os.getenv("USE_FULL_FRAME", "1") == "1"
 X = int(os.getenv("ROI_X", "3"))
 Y = int(os.getenv("ROI_Y", "4"))
 W = int(os.getenv("ROI_W", "507"))
@@ -26,6 +27,8 @@ MODEL_IMG_SIZE = int(os.getenv("KERAS_INPUT_SIZE", "256"))
 ALPHA = float(os.getenv("OVERLAY_ALPHA", "0.35"))
 THRESH = float(os.getenv("KERAS_THRESHOLD", "0.85"))
 RUN_EVERY_N_FRAMES = int(os.getenv("RUN_EVERY_N_FRAMES", "3"))
+ASYNC_INFER = os.getenv("ASYNC_INFER", "1") == "1"
+USE_TF_FUNCTION = os.getenv("USE_TF_FUNCTION", "1") == "1"
 
 POST_MORPH = os.getenv("POST_MORPH", "1") == "1"
 MORPH_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -74,14 +77,27 @@ if isinstance(model_input_shape, (list, tuple)) and model_input_shape:
 if isinstance(model_input_shape, tuple) and len(model_input_shape) >= 3:
     model_input_h = int(model_input_shape[1] or MODEL_IMG_SIZE)
     model_input_w = int(model_input_shape[2] or MODEL_IMG_SIZE)
+model_input_area = float(model_input_h * model_input_w)
+
+
+if USE_TF_FUNCTION:
+    @tf.function
+    def _infer(x_tensor: tf.Tensor) -> tf.Tensor:
+        y = model([x_tensor], training=False)
+        if isinstance(y, (list, tuple)):
+            y = y[0]
+        return y
+else:
+    def _infer(x_tensor: tf.Tensor) -> tf.Tensor:
+        y = model([x_tensor], training=False)
+        if isinstance(y, (list, tuple)):
+            y = y[0]
+        return y
 
 
 def run_model(x_in: np.ndarray) -> np.ndarray:
     x_tensor = tf.convert_to_tensor(x_in, dtype=tf.float32)
-    y = model([x_tensor], training=False)
-    if isinstance(y, (list, tuple)):
-        y = y[0]
-    return y.numpy()
+    return _infer(x_tensor).numpy()
 
 
 _dummy = np.zeros((1, model_input_h, model_input_w, 1), dtype=np.float32)
@@ -199,6 +215,54 @@ def reset_temporal():
     MASK_HISTORY.clear()
 
 
+pending_lock = threading.Lock()
+pending_event = threading.Event()
+pending_input = None
+pending_id = 0
+
+pred_lock = threading.Lock()
+pred_output = None
+pred_output_id = 0
+pred_output_ms = 0.0
+
+stop_event = threading.Event()
+
+
+def submit_infer(x_in: np.ndarray):
+    global pending_input, pending_id
+    with pending_lock:
+        pending_input = x_in
+        pending_id += 1
+    pending_event.set()
+
+
+def infer_worker():
+    global pred_output, pred_output_id, pred_output_ms
+    while not stop_event.is_set():
+        pending_event.wait(0.01)
+        if not pending_event.is_set():
+            continue
+        with pending_lock:
+            x_in = pending_input
+            pid = pending_id
+            pending_input = None
+            pending_event.clear()
+        if x_in is None:
+            continue
+        t0 = time.time()
+        pred = run_model(x_in)
+        infer_ms = (time.time() - t0) * 1000.0
+        with pred_lock:
+            pred_output = pred
+            pred_output_id = pid
+            pred_output_ms = infer_ms
+
+
+infer_thread = None
+if ASYNC_INFER:
+    infer_thread = threading.Thread(target=infer_worker, daemon=True)
+    infer_thread.start()
+
 cap = _open_capture(IDX)
 if not cap.isOpened():
     raise RuntimeError("Cannot open OBS Virtual Camera. Make sure it is started.")
@@ -208,6 +272,7 @@ t_prev = time.time()
 infer_ms_smooth = 0.0
 frame_i = 0
 last_mask_roi = None
+last_pred_id = 0
 
 while True:
     ok, frame = cap.read()
@@ -236,12 +301,27 @@ while True:
     area_ratio = 0.0
     mean_prob = 0.0
     vote_ready = (len(MASK_HISTORY) == VOTE_K)
+    new_pred = None
+    infer_ms = None
 
     if (not gated) and (frame_i % RUN_EVERY_N_FRAMES == 0):
-        t0 = time.time()
         x_in = preprocess_roi_to_model(gray)
-        pred = run_model(x_in)
-        pred = np.squeeze(pred)
+        if ASYNC_INFER:
+            submit_infer(x_in)
+        else:
+            t0 = time.time()
+            new_pred = run_model(x_in)
+            infer_ms = (time.time() - t0) * 1000.0
+
+    if ASYNC_INFER:
+        with pred_lock:
+            if pred_output_id > last_pred_id:
+                new_pred = pred_output
+                infer_ms = pred_output_ms
+                last_pred_id = pred_output_id
+
+    if (not gated) and (new_pred is not None):
+        pred = np.squeeze(new_pred)
 
         if pred.ndim == 3:
             pred = pred[..., 0]
@@ -256,7 +336,7 @@ while True:
         else:
             largest_area = int((m256 > 0).sum())
 
-        area_ratio = largest_area / float(MODEL_IMG_SIZE * MODEL_IMG_SIZE)
+        area_ratio = largest_area / model_input_area
 
         if area_ratio < MIN_AREA_RATIO_256:
             m256[:] = 0
@@ -275,8 +355,8 @@ while True:
             if (
                 bx < BORDER_MARGIN_256
                 or by < BORDER_MARGIN_256
-                or (bx + bw) > (MODEL_IMG_SIZE - BORDER_MARGIN_256)
-                or (by + bh) > (MODEL_IMG_SIZE - BORDER_MARGIN_256)
+                or (bx + bw) > (model_input_w - BORDER_MARGIN_256)
+                or (by + bh) > (model_input_h - BORDER_MARGIN_256)
             ):
                 m256[:] = 0
                 largest_area = 0
@@ -302,10 +382,10 @@ while True:
                 m256[:] = 0
 
         last_mask_roi = cv2.resize(m256, (roi.shape[1], roi.shape[0]), interpolation=cv2.INTER_NEAREST)
-
-        t1 = time.time()
-        infer_ms = (t1 - t0) * 1000.0
-        infer_ms_smooth = infer_ms if infer_ms_smooth == 0 else (0.9 * infer_ms_smooth + 0.1 * infer_ms)
+        if infer_ms is not None:
+            infer_ms_smooth = (
+                infer_ms if infer_ms_smooth == 0 else (0.9 * infer_ms_smooth + 0.1 * infer_ms)
+            )
         did_infer = True
 
     blended = overlay_mask_green(roi, last_mask_roi, ALPHA)
@@ -414,6 +494,11 @@ while True:
         MEAN_PROB_MIN = max(0.50, MEAN_PROB_MIN - 0.01)
         last_mask_roi = None
         reset_temporal()
+
+stop_event.set()
+pending_event.set()
+if infer_thread is not None:
+    infer_thread.join(timeout=1.0)
 
 cap.release()
 cv2.destroyAllWindows()
