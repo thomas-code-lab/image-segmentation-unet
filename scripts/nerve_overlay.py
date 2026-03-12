@@ -62,8 +62,30 @@ HUD_LINE_GAP = 6
 if not os.path.exists(MODEL_PATH):
     raise FileNotFoundError(f"Model not found at {MODEL_PATH}")
 model = tf.keras.models.load_model(MODEL_PATH, compile=False)
-_dummy = np.zeros((1, MODEL_IMG_SIZE, MODEL_IMG_SIZE, 1), dtype=np.float32)
-_ = model(_dummy, training=False).numpy()
+print("Loaded model:", MODEL_PATH)
+print("Model input shape:", model.input_shape)
+print("Model output shape:", model.output_shape)
+
+model_input_h = MODEL_IMG_SIZE
+model_input_w = MODEL_IMG_SIZE
+model_input_shape = model.input_shape
+if isinstance(model_input_shape, (list, tuple)) and model_input_shape:
+    model_input_shape = model_input_shape[0]
+if isinstance(model_input_shape, tuple) and len(model_input_shape) >= 3:
+    model_input_h = int(model_input_shape[1] or MODEL_IMG_SIZE)
+    model_input_w = int(model_input_shape[2] or MODEL_IMG_SIZE)
+
+
+def run_model(x_in: np.ndarray) -> np.ndarray:
+    x_tensor = tf.convert_to_tensor(x_in, dtype=tf.float32)
+    y = model([x_tensor], training=False)
+    if isinstance(y, (list, tuple)):
+        y = y[0]
+    return y.numpy()
+
+
+_dummy = np.zeros((1, model_input_h, model_input_w, 1), dtype=np.float32)
+_ = run_model(_dummy)
 
 
 def _open_capture(index: int) -> cv2.VideoCapture:
@@ -94,7 +116,7 @@ def select_roi(frame: np.ndarray):
 
 
 def preprocess_roi_to_model(gray_roi: np.ndarray) -> np.ndarray:
-    img = cv2.resize(gray_roi, (MODEL_IMG_SIZE, MODEL_IMG_SIZE), interpolation=cv2.INTER_LINEAR)
+    img = cv2.resize(gray_roi, (model_input_w, model_input_h), interpolation=cv2.INTER_LINEAR)
     x = img.astype(np.float32) / 255.0
     return x[None, ..., None]
 
@@ -218,7 +240,7 @@ while True:
     if (not gated) and (frame_i % RUN_EVERY_N_FRAMES == 0):
         t0 = time.time()
         x_in = preprocess_roi_to_model(gray)
-        pred = model(x_in, training=False).numpy()
+        pred = run_model(x_in)
         pred = np.squeeze(pred)
 
         if pred.ndim == 3:
