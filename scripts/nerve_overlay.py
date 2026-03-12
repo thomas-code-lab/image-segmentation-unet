@@ -24,7 +24,7 @@ if not os.path.exists(MODEL_PATH) and os.path.exists(DEFAULT_MODEL):
 
 MODEL_IMG_SIZE = int(os.getenv("KERAS_INPUT_SIZE", "256"))
 ALPHA = float(os.getenv("OVERLAY_ALPHA", "0.35"))
-THRESH = float(os.getenv("KERAS_THRESHOLD", "0.9"))
+THRESH = float(os.getenv("KERAS_THRESHOLD", "0.85"))
 RUN_EVERY_N_FRAMES = int(os.getenv("RUN_EVERY_N_FRAMES", "2"))
 
 POST_MORPH = os.getenv("POST_MORPH", "1") == "1"
@@ -43,7 +43,7 @@ BORDER_REJECT = os.getenv("BORDER_REJECT", "1") == "1"
 BORDER_MARGIN_256 = int(os.getenv("BORDER_MARGIN", "6"))
 
 MEAN_PROB_ENABLED = os.getenv("MEAN_PROB_ENABLED", "1") == "1"
-MEAN_PROB_MIN = float(os.getenv("MEAN_PROB_MIN", "0.85"))
+MEAN_PROB_MIN = float(os.getenv("MEAN_PROB_MIN", "0.92"))
 
 TEMPORAL_VOTE = os.getenv("TEMPORAL_VOTE", "1") == "1"
 VOTE_K = int(os.getenv("VOTE_K", "3"))
