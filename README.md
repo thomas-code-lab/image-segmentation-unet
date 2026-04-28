@@ -102,4 +102,4 @@ The backend exposes a live MJPEG stream with segmentation overlay at:
 ## Built With
 - [Thomas P.](https://github.com/thomas-code-lab)
 - [Stacey](https://github.com/staceylqy/Ultrasafe)
-- Hugo
+- [Hugo](https://github.com/learnhugo)
